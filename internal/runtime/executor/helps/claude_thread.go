@@ -46,10 +46,10 @@ type ClaudeThreadBetaPolicy struct {
 type ClaudeThreadBetaConflictError struct{}
 
 func (ClaudeThreadBetaConflictError) Error() string {
-	return "The Thread beta profile conflicts with the current header policy or cannot be reconstructed. Replay the full conversation with thread create."
+	return "No reusable thread state for the requested previous_message_id: the Thread beta profile conflicts with the current header policy or cannot be reconstructed. Replay the full conversation with thread create."
 }
 
-func (ClaudeThreadBetaConflictError) StatusCode() int { return http.StatusConflict }
+func (ClaudeThreadBetaConflictError) StatusCode() int { return http.StatusNotFound }
 
 func (ClaudeThreadBetaConflictError) IsRequestScoped() bool { return true }
 
