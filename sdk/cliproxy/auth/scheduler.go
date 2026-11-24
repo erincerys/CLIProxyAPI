@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyFillMostUsed       schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -46,6 +47,7 @@ type authScheduler struct {
 	mu                  sync.Mutex
 	strategy            schedulerStrategy
 	weightedSelector    *WeightedRoundRobinSelector
+	rescuePolicy        rescuePolicy
 	providers           map[string]*providerScheduler
 	authProviders       map[string]string
 	authGenerations     map[string]scheduledGenerationMeta
@@ -156,16 +158,15 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
-	weighted := UnwrapWeightedRoundRobinSelector(selector)
-	return &authScheduler{
-		strategy:            selectorStrategy(selector),
-		weightedSelector:    weighted,
+	scheduler := &authScheduler{
 		providers:           make(map[string]*providerScheduler),
 		authProviders:       make(map[string]string),
 		authGenerations:     make(map[string]scheduledGenerationMeta),
 		mixedCursors:        make(map[string]int),
 		mixedWeightedStates: make(map[string]*smoothWeightedState),
 	}
+	scheduler.setSelector(selector)
+	return scheduler
 }
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
@@ -173,6 +174,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *FillMostUsedSelector:
+		return schedulerStrategyFillMostUsed
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
 	case nil, *RoundRobinSelector:
@@ -191,6 +194,19 @@ func (s *authScheduler) setSelector(selector Selector) {
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
 	s.weightedSelector = UnwrapWeightedRoundRobinSelector(selector)
+	s.rescuePolicy = rescuePolicy{}
+	if mostUsed, ok := selector.(*FillMostUsedSelector); ok && mostUsed != nil {
+		s.rescuePolicy = rescuePolicy{within: mostUsed.RescueWithin, headroom: mostUsed.RescueHeadroom}
+		for _, provider := range s.providers {
+			for _, shard := range provider.modelShards {
+				for authID, entry := range shard.entries {
+					if latest := provider.auths[authID]; latest != nil {
+						entry.auth = latest.auth
+					}
+				}
+			}
+		}
+	}
 	clear(s.mixedCursors)
 	clear(s.mixedWeightedStates)
 }
@@ -523,7 +539,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		route := namespace + ":" + canonicalModelLookupKey(weightedSelectorStateModel(ctx, model))
 		return s.pickWeightedPoolLocked(route, priority, transportClass, entries, accountingPredicate, pinnedAuthID, nonWebsocketOnly)
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate, s.rescuePolicy); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -584,7 +600,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
-		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+		if picked := shard.pickReadyLocked(false, strategy, predicate, s.rescuePolicy); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -634,13 +650,13 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	if strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst || strategy == schedulerStrategyFillMostUsed {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate, s.rescuePolicy)
 			if picked != nil {
 				return picked, providerKey, nil
 			}
@@ -725,7 +741,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate, s.rescuePolicy)
 		if picked == nil {
 			continue
 		}
@@ -1125,6 +1141,15 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	} else {
 		providerState.upsertAuthForModelsLocked(meta, targetModels, credentialScoped, now)
 	}
+	if s.strategy == schedulerStrategyFillMostUsed {
+		for _, shard := range providerState.modelShards {
+			if shard != nil {
+				if entry := shard.entries[authID]; entry != nil {
+					entry.auth = meta.auth
+				}
+			}
+		}
+	}
 }
 
 func (s *authScheduler) removeAuthFromProvidersLocked(authID string) {
@@ -1460,7 +1485,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, rp rescuePolicy) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1469,7 +1494,7 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 	if !okPriority {
 		return nil
 	}
-	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate, rp)
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
@@ -1505,7 +1530,7 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool, rp rescuePolicy) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -1521,6 +1546,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	switch strategy {
 	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
+	case schedulerStrategyFillMostUsed:
+		picked = view.pickMostUsed(predicate, m.modelKey, time.Now(), rp)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
 	default:
@@ -1829,6 +1856,21 @@ func (v *readyView) pickFirst(predicate func(*scheduledAuth) bool) *scheduledAut
 		}
 	}
 	return nil
+}
+
+func (v *readyView) pickMostUsed(predicate func(*scheduledAuth) bool, modelKey string, now time.Time, rp rescuePolicy) *scheduledAuth {
+	var picked *scheduledAuth
+	var bestRank usageRank
+	for _, entry := range v.flat {
+		if entry == nil || entry.auth == nil || (predicate != nil && !predicate(entry)) {
+			continue
+		}
+		rank := usageRankFor(entry.auth, modelKey, now, rp)
+		if picked == nil || usageRankLess(rank, bestRank, entry.auth.ID, picked.auth.ID) {
+			picked, bestRank = entry, rank
+		}
+	}
+	return picked
 }
 
 // pickRoundRobin returns the next ready entry using flat round-robin traversal.

@@ -169,6 +169,13 @@ type Service struct {
 	antigravityRefreshPending map[string]*antigravityModelRefreshRequest
 	antigravityPersistPending map[string]*antigravityHintPersistRequest
 	antigravityPersistActive  map[string]*antigravityHintPersistRequest
+	usageRefreshMu            sync.Mutex
+	usageRefreshContext       context.Context
+	usageRefreshCancel        context.CancelFunc
+	usageRefreshDone          chan struct{}
+	usageRefreshInterval      time.Duration
+	usageRefreshFetchers      map[string]usageHeadersFetcher
+	usageRefreshAccounts      map[string]*usageRefreshAccount
 }
 
 // SetResultPolicy sets an execution result policy on the underlying core auth manager.

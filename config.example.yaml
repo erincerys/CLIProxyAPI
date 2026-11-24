@@ -180,7 +180,11 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, fill-most-used
+  usage-refresh-interval: "10m" # Refresh idle OAuth usage for fill-most-used; 0 disables.
+  # fill-most-used prioritizes unused weekly quota about to reset. Either value 0 disables rescue.
+  usage-rescue-within: "24h"
+  usage-rescue-headroom: 0.25 # Minimum unused weekly quota fraction, clamped to [0, 1].
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # Sticky requests (including inherited and LCP bindings) also consume weighted credits
