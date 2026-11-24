@@ -234,6 +234,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.configRuntimeMu.Unlock()
 	}
 
+	s.startUsageRefresh(ctx)
 	s.registerModelRefreshCallback()
 	if !homeEnabled {
 		go s.runAntigravityModelRefresh(ctx)
@@ -284,6 +285,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				shutdownErr = ctx.Err()
 			}
 		}
+
+		s.stopUsageRefresh()
 
 		s.homeLifecycleMu.Lock()
 		if supervisor := s.homeSupervisor; supervisor != nil {

@@ -573,11 +573,14 @@ type QuotaExceeded struct {
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
-// RoutingConfig configures how credentials are selected for requests.
+// RoutingConfig configures credential selection and idle usage refresh.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "fill-most-used".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// UsageRefreshInterval refreshes idle OAuth usage for fill-most-used. Default: 10m; 0 disables.
+	UsageRefreshInterval string `yaml:"usage-refresh-interval,omitempty" json:"usage-refresh-interval,omitempty"`
 
 	// UsageRescueWithin prioritizes unused weekly quota resetting within this duration. Default: 24h; 0 disables.
 	UsageRescueWithin string `yaml:"usage-rescue-within,omitempty" json:"usage-rescue-within,omitempty"`
@@ -620,7 +623,7 @@ type RoutingConfig struct {
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
 }
 
-// UnmarshalYAML leaves invalid rescue settings unset so routing uses its defaults.
+// UnmarshalYAML leaves invalid usage settings unset so routing uses its defaults.
 func (c *RoutingConfig) UnmarshalYAML(value *yaml.Node) error {
 	type rawRoutingConfig RoutingConfig
 	copyValue := *value
@@ -628,7 +631,7 @@ func (c *RoutingConfig) UnmarshalYAML(value *yaml.Node) error {
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		key, node := value.Content[i], value.Content[i+1]
 		switch key.Value {
-		case "usage-rescue-within":
+		case "usage-rescue-within", "usage-refresh-interval":
 			var within string
 			if errDecode := node.Decode(&within); errDecode != nil {
 				continue

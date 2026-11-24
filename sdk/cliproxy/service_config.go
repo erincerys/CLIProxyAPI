@@ -63,6 +63,7 @@ type routingRuntimeState struct {
 	sessionAffinitySubagents bool
 	sessionAffinityRebindOn  string
 	usageRescueWithin        time.Duration
+	usageRefreshInterval     time.Duration
 	usageRescueHeadroom      float64
 }
 
@@ -73,6 +74,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		sessionAffinitySubagents: true,
 		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
 		usageRescueWithin:        24 * time.Hour,
+		usageRefreshInterval:     10 * time.Minute,
 		usageRescueHeadroom:      0.25,
 	}
 	if cfg == nil {
@@ -88,6 +90,11 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-most-used"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	if interval := strings.TrimSpace(cfg.Routing.UsageRefreshInterval); interval != "" {
+		if parsed, errParse := time.ParseDuration(interval); errParse == nil && parsed >= 0 {
+			state.usageRefreshInterval = parsed
+		}
+	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -310,6 +317,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		return false
 	}
 	s.coreManager.SetOAuthModelAlias(commit.cfg.OAuthModelAlias)
+	s.applyUsageRefreshConfig(commit.cfg)
 	return true
 }
 
