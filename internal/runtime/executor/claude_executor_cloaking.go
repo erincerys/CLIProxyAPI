@@ -969,7 +969,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 		injectClaudeCodeCurrentDateInternalDoc(doc, currentDate, isExplicit)
 		return true
 	}
-	if claudeHistoryHasAdvisorCallOrResultDoc(doc) {
+	if claudeHistoryHasAdvisorCallOrResultDoc(doc) || claudeMidConversationSystemWouldFollowNewestContentDoc(doc) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
 		}
@@ -1343,6 +1343,25 @@ func claudeCallerSystemReminder(text string) string {
 	}
 	reminder.WriteString("</system-reminder>")
 	return reminder.String()
+}
+
+// Anthropic accepts a role=system turn only before an assistant turn or at the
+// end of the array.
+func claudeMidConversationSystemWouldFollowNewestContentDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	firstUserIdx := firstClaudeUserMessageIndexDoc(doc)
+	messages := doc.Get("messages").Array()
+	if firstUserIdx < 0 || firstUserIdx+1 >= len(messages) {
+		return false
+	}
+	for _, message := range messages[firstUserIdx+1:] {
+		if message.Get("role").String() != "user" {
+			return false
+		}
+	}
+	return true
 }
 
 // claudeHistoryHasAdvisorCallOrResult reports whether messages contains an advisor
