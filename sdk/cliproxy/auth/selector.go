@@ -74,7 +74,12 @@ type smoothWeightedState struct {
 type weightedSelectorStateModelKey struct{}
 
 func withWeightedSelectorStateModel(ctx context.Context, selector Selector, routeModel string) context.Context {
-	if _, ok := selector.(*WeightedRoundRobinSelector); !ok || strings.TrimSpace(routeModel) == "" {
+	switch selector.(type) {
+	case *WeightedRoundRobinSelector, *FillMostUsedSelector:
+	default:
+		return ctx
+	}
+	if strings.TrimSpace(routeModel) == "" {
 		return ctx
 	}
 	return context.WithValue(ctx, weightedSelectorStateModelKey{}, routeModel)
@@ -93,6 +98,12 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
+
+// FillMostUsedSelector selects available credentials by provider-reported quota usage.
+type FillMostUsedSelector struct {
+	RescueWithin   time.Duration
+	RescueHeadroom float64
+}
 
 type blockReason int
 
@@ -1246,6 +1257,27 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 func IsAuthAvailableForModel(auth *Auth, model string, now time.Time) bool {
 	blocked, _, _ := isAuthBlockedForModel(auth, model, now)
 	return !blocked
+}
+
+// Pick selects the highest-ranked available auth for the provider.
+func (s *FillMostUsedSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	now := time.Now()
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	modelKey := canonicalModelKey(weightedSelectorStateModel(ctx, model))
+	rp := rescuePolicy{within: s.RescueWithin, headroom: s.RescueHeadroom}
+	picked := available[0]
+	bestRank := usageRankFor(picked, modelKey, now, rp)
+	for _, candidate := range available[1:] {
+		rank := usageRankFor(candidate, modelKey, now, rp)
+		if usageRankLess(rank, bestRank, candidate.ID, picked.ID) {
+			picked, bestRank = candidate, rank
+		}
+	}
+	return picked, nil
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

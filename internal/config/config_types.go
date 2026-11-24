@@ -576,8 +576,14 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "fill-most-used".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// UsageRescueWithin prioritizes unused weekly quota resetting within this duration. Default: 24h; 0 disables.
+	UsageRescueWithin string `yaml:"usage-rescue-within,omitempty" json:"usage-rescue-within,omitempty"`
+
+	// UsageRescueHeadroom is the minimum unused weekly quota fraction for rescue. Default: 0.25; 0 disables.
+	UsageRescueHeadroom *float64 `yaml:"usage-rescue-headroom,omitempty" json:"usage-rescue-headroom,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, pi, and generic (X-Session-ID) session headers
@@ -612,6 +618,35 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+}
+
+// UnmarshalYAML leaves invalid rescue settings unset so routing uses its defaults.
+func (c *RoutingConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawRoutingConfig RoutingConfig
+	copyValue := *value
+	copyValue.Content = make([]*yaml.Node, 0, len(value.Content))
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key, node := value.Content[i], value.Content[i+1]
+		switch key.Value {
+		case "usage-rescue-within":
+			var within string
+			if errDecode := node.Decode(&within); errDecode != nil {
+				continue
+			}
+		case "usage-rescue-headroom":
+			var headroom float64
+			if errDecode := node.Decode(&headroom); errDecode != nil || math.IsNaN(headroom) || math.IsInf(headroom, 0) {
+				continue
+			}
+		}
+		copyValue.Content = append(copyValue.Content, key, node)
+	}
+	var raw rawRoutingConfig
+	if errDecode := copyValue.Decode(&raw); errDecode != nil {
+		return errDecode
+	}
+	*c = RoutingConfig(raw)
+	return nil
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
