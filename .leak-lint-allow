@@ -1,0 +1,8 @@
+# Upstream CLIProxyAPI docs and tests use a private example address in the proxy-URL example.
+config.example.yaml:Example: socks5://user:pass@[0-9.]+:1080/
+# Upstream test fixture: proxy URL redaction keeps host and port of an example address.
+internal/watcher/diff/config_diff_test.go:socks5RedactsUserinfoAndPath
+# Upstream test fixture: zeroconf address filtering over a list of example IPs.
+internal/discovery/zeroconf_review_test.go:ips := \[\]net\.IP\{nil, \{1, 2\}
+# Upstream test fixture: management client base-URL normalisation of an example LAN host.
+internal/tui/client_test.go:(input|expected)URL: +"http://[0-9.]+:8317"
