@@ -611,6 +611,11 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 	}
 	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
+		// Gateways in front of CPA may drop error.details; Claude Code also
+		// recognizes the marker in the message text.
+		if !strings.Contains(response.Error.Message, "thread_not_found") {
+			response.Error.Message = "thread_not_found: " + response.Error.Message
+		}
 	}
 	return response
 }
